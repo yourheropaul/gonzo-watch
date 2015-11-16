@@ -1,91 +1,83 @@
 package watch
 
 import (
-	"sync/atomic"
+	"os"
 	"time"
 
 	"github.com/omeid/gonzo/context"
-	"github.com/omeid/kargar"
 	"github.com/omeid/slurp/tools/glob"
-	"gopkg.in/fsnotify.v1"
 )
 
-func throttle(limit time.Duration) func(func()) bool {
-	var last int64
-	lims := limit.Seconds()
+type fileNameChan chan string
+type errorChan chan error
 
-	return func(cb func()) bool {
-		now := time.Now().Unix()
-		l := atomic.LoadInt64(&last)
+func watchFile(filePath string) error {
 
-		if l+int64(lims) < now {
-			cb()
-			atomic.StoreInt64(&last, now)
-			return true
-		}
-		return false
-	}
-}
-
-func Watcher(ctx context.Context, cb func(string), globs ...string) error {
-
-	files, err := glob.Glob(globs...)
-
+	initialStat, err := os.Stat(filePath)
 	if err != nil {
 		return err
 	}
 
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-
-	for matchpair := range files {
-		w.Add(matchpair.Name)
-	}
-
-	throttled := throttle(50 * time.Millisecond)
-	go func() {
-		for {
-			select {
-			case event := <-w.Events:
-				//if event.Op&fsnotify.Write == fsnotify.Write {
-				//event.Op&fsnotify.Create == fsnotify.Create ||
-				throttled(func() {
-					cb(event.Name)
-				})
-				//}
-			case err := <-w.Errors:
-				if err != nil {
-					ctx.Error(err)
-				}
-			case <-ctx.Done():
-				w.Close()
-				return
-			}
+	for {
+		stat, err := os.Stat(filePath)
+		if err != nil {
+			return err
 		}
-	}()
+
+		if stat.Size() != initialStat.Size() || stat.ModTime() != initialStat.ModTime() {
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+	}
 
 	return nil
 }
 
-func WatchSet(cb func(context.Context, ...string) error, watches map[string][]string) kargar.Action {
-	return func(ctx context.Context) error {
+func monitorFile(p string, c fileNameChan, e errorChan) {
 
-		//function wrapper to copy set and files.
-		for set, files := range watches {
-			var s = set
-			err := Watcher(
-				ctx,
-				func(string) { cb(ctx, s) },
-				files...,
-			)
+	go func() {
+		for {
+			// Wait for the file to change. If there's an error,
+			// put it into the error channel
+			err := watchFile(p)
 			if err != nil {
-				return err
+				e <- err
+				break
+			}
+
+			// On change, return the file path and loop
+			c <- p
+		}
+	}()
+}
+
+func Watcher(c context.Context, task func(string), globs ...string) {
+
+	files, err := glob.Glob(globs...)
+
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	// Create some channels
+	f := make(fileNameChan)
+	e := make(errorChan)
+
+	for matchpair := range files {
+		monitorFile(matchpair.Name, f, e)
+	}
+
+	go func() {
+		for {
+			select {
+			case fn := <-f:
+				task(fn)
+
+			case err := <-e:
+				c.Error(err)
 			}
 		}
-		<-ctx.Done()
-		return nil
-
-	}
+	}()
 }
