@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/omeid/gonzo/context"
-	"github.com/omeid/slurp/tools/glob"
+	"github.com/go-gonzo/fs/glob"
 )
 
 type fileNameChan chan string
